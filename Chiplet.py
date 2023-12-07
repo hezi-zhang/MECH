@@ -1,5 +1,6 @@
 import networkx as nx
 import matplotlib.pyplot as plt
+from CouplingGraph import *
 
 def gen_square_lattice(x_dim, y_dim):
     return nx.grid_2d_graph(x_dim, y_dim)
@@ -55,29 +56,58 @@ def gen_chiplet_array(geometry, array_x_dim, array_y_dim, chiplet_x_size, chiple
 
     if geometry == 'square':
         G=gen_square_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
+        G.cross_link_rows = list(range(chiplet_y_size))
+        G.cross_link_cols = list(range(chiplet_x_size))
     if geometry == 'hexagon':
+        if chiplet_x_size % 2 == 1:
+            print('WARNING: hexagon chiplets should have even columns')
+            chiplet_x_size -= 1
         G=gen_hexagon_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
+        G.cross_link_rows = list(range(chiplet_y_size))
+        G.cross_link_cols = list(range((chiplet_y_size+1)%2,chiplet_x_size,2))
     if geometry == 'heavy_square':
+        if chiplet_x_size % 2 == 1:
+            print('WARNING: heavy square chiplets should have even columns')
+            chiplet_x_size -= 1
+        if chiplet_y_size % 2 == 1:
+            print('WARNING: heavy square chiplets should have even rows')
+            chiplet_y_size -= 1
         G=gen_heavy_square_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
+        G.cross_link_rows = list(range(0,chiplet_y_size,2))
+        G.cross_link_cols = list(range(0,chiplet_x_size,2))
     if geometry == 'heavy_hexagon':
+        if chiplet_x_size % 4 != 0:
+            print('WARNING: heavy hexagon chiplets should have 4n columns')
+            chiplet_x_size = chiplet_x_size // 4 * 4
+        if chiplet_y_size % 2 == 1:
+            print('WARNING: heavy hexagon chiplets should have even rows')
+            chiplet_y_size -= 1
         G=gen_heavy_hexagon_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
+        G.cross_link_rows = list(range(0,chiplet_y_size,2))
+        G.cross_link_cols = list(range(2,chiplet_x_size,4))
     G.array_x_dim = array_x_dim
     G.array_y_dim = array_y_dim
     G.chiplet_x_size = chiplet_x_size
     G.chiplet_y_size = chiplet_y_size
+    G.highway_qubits = None
+    G.highway_distance_dict = None
+    G.local_coupling_graph = None
+    G.highway_coupling_graph = None
     for node in G.nodes:
         G.nodes[node]['type'] = 'data'
         
     gen_node_ids(G, chiplet_x_size, chiplet_y_size)
     gen_link_types(G)
-    if cross_link_rows is None:
-        cross_link_rows = list(range(chiplet_y_size))
-    if cross_link_cols is None:
-        cross_link_cols = list(range(chiplet_y_size))
-    gen_sparse_chip_links(G,cross_link_rows, cross_link_cols)
+    if cross_link_rows:
+        G.cross_link_rows &= cross_link_rows
+    if cross_link_cols:
+        G.cross_link_cols &= cross_link_cols
+    gen_sparse_chip_links(G,G.cross_link_rows, G.cross_link_cols)
     return G
 
+
 def gen_interleaving_path_between(G, source, target, adhoc_dense=True, offset=None):
+    
     if offset == 'left' or offset == 'down':
         coor_offset = -1
     elif offset == 'right' or offset == 'up':
@@ -86,21 +116,34 @@ def gen_interleaving_path_between(G, source, target, adhoc_dense=True, offset=No
         coor_offset = 0
     all_shortest_paths = list(nx.all_shortest_paths(G, source, target))
     shortest_path = min(all_shortest_paths, key=lambda path: sum(abs(x-(source[0] + 0.5*coor_offset)) for x,_ in path))
-    left_pointer = 0
-    right_pointer = len(shortest_path) - 1
+    
+    even_flag = 1
+    for snode in shortest_path:
+        if 'used_times' in G.nodes[snode].keys():
+            G.nodes[snode]['used_times'] = G.nodes[snode]['used_times'] + 1
+        else:
+            G.nodes[snode]['used_times'] = 1
+        cross_chip_flag = 0
+        for neigh_node in G.neighbors(snode):
+            if G[snode][neigh_node]['type'] == 'cross_chip':
+                cross_chip_flag = 1
+                break  
+        
+        if cross_chip_flag:
+            G.nodes[snode]['type'] = 'highway'
+        
+        if even_flag:
+            G.nodes[snode]['type'] = 'highway'
+            even_flag = 0
+        else:
+            if G.nodes[snode]['type'] == 'data':
+                even_flag = 1
+    begin_node = shortest_path[0]
+    end_node = shortest_path[-1]
+    G.nodes[begin_node]['type'] = 'highway'
+    G.nodes[end_node]['type'] = 'highway'
+    return
 
-    while right_pointer - left_pointer > 2:
-        left_node, right_node = shortest_path[left_pointer], shortest_path[right_pointer]
-        G.nodes[left_node]['type'] = 'highway'
-        G.nodes[right_node]['type'] = 'highway'
-
-        left_pointer += 2
-        right_pointer -= 2
-    if left_pointer > right_pointer:
-        left_pointer, right_pointer = right_pointer, left_pointer
-    for node in shortest_path[left_pointer:right_pointer + 1]:
-        G.nodes[node]['type'] = 'undetermined'
-    return shortest_path[left_pointer:right_pointer + 1]
 
 def potential_highway_nodes_within_radius(G, node, radius):
     neighborhood = nx.ego_graph(G, node, radius=radius, center=False)
@@ -109,34 +152,19 @@ def potential_highway_nodes_within_radius(G, node, radius):
 
 def deal_with_undetermined_nodes(G, adhoc_dense=True):
     for node in G.nodes:
-        if G.nodes[node]['type'] == 'undetermined':
-            neighborhood = potential_highway_nodes_within_radius(G, node, 2)
-            for nei in neighborhood:
-                if not adhoc_dense:
-                    x, y = nei
-                    max_x, max_y = G.array_x_dim * G.chiplet_x_size, G.array_y_dim * G.chiplet_y_size
-                else:
-                    x, y = G.nodes[nei]['id'][-2:]
-                    max_x, max_y = G.chiplet_x_size, G.chiplet_y_size
-                is_on_edge = x==0 or x==max_x-1 or y==0 or y==max_y-1
-
-                if G.nodes[nei]['type'] == 'highway':
-                    least_neighbors = 2 - is_on_edge + 1
-                if G.nodes[nei]['type'] == 'undetermined':
-                    least_neighbors = 4 - is_on_edge
-                # print(nei, is_on_edge, len(potential_highway_nodes_within_radius(G, nei, 2)), least_neighbors)
-                if len(potential_highway_nodes_within_radius(G, nei, 2)) < least_neighbors:
-                        G.nodes[node]['type'] = 'highway'
+        if G.nodes[node]['type'] == 'highway':
+            index = 0
+            for neigh_node in G.neighbors(node):
+                if G.nodes[neigh_node]['type'] == 'highway':
+                    index += 1
+            if index >= G.nodes[node]['used_times'] * 2:
+                cross_chip_flag = 0
+                for neigh_node in G.neighbors(node):
+                    if G[node][neigh_node]['type'] == 'cross_chip':
+                        cross_chip_flag = 1
                         break
-                else:
-                    neighborhood = potential_highway_nodes_within_radius(G, nei, 2)
-                    neighborhood.remove(node)
-                    this_row = [n for n in neighborhood if n[1] == nei[1]]
-                    if len(this_row) == 1:
-                        G.nodes[node]['type'] = 'highway'
-                        break
-            if G.nodes[node]['type'] == 'undetermined': 
-                G.nodes[node]['type'] = 'data' 
+                if cross_chip_flag == 0:  
+                    G.nodes[node]['type'] = 'data'
 
 def gen_road_along(G, row=None, col=None, offset=None, adhoc_dense=True):
     max_x, max_y = G.array_x_dim * G.chiplet_x_size, G.array_y_dim * G.chiplet_y_size
@@ -149,14 +177,32 @@ def gen_road_along(G, row=None, col=None, offset=None, adhoc_dense=True):
         if row:
             left_most_id, right_most_id = G.nodes[(0, row)]['id'], G.nodes[(max_x-1, row)]['id']
             for array_x in range(left_most_id[0], right_most_id[0]+1):
-                array_y = left_most_id[1]
-                gen_interleaving_path_between(G, (array_x * G.chiplet_x_size, array_y * G.chiplet_y_size + row), ((array_x+1) * G.chiplet_x_size -1, array_y * G.chiplet_y_size + row))
+                # array_y = left_most_id[1]
+                # print(array_x, array_y,'?',(array_x * G.chiplet_x_size, array_y * G.chiplet_y_size + row), ((array_x+1) * G.chiplet_x_size -1, array_y * G.chiplet_y_size + row))
+                
+                gen_interleaving_path_between(G, (array_x * G.chiplet_x_size, row), ((array_x+1) * G.chiplet_x_size -1, row))
         if col:
             bottom_most_id, up_most_id = G.nodes[(col, 0)]['id'], G.nodes[(col, max_y-1)]['id']
             for array_y in range(bottom_most_id[1], up_most_id[1]+1):
-                array_x = left_most_id[0]
-                gen_interleaving_path_between(G, (array_x * G.chiplet_x_size + col, array_y * G.chiplet_y_size), (array_x * G.chiplet_x_size + col, (array_y+1) * G.chiplet_y_size -1), offset=offset)
+                # array_x = left_most_id[0]
+                gen_interleaving_path_between(G, (col, array_y * G.chiplet_y_size), (col, (array_y+1) * G.chiplet_y_size -1), offset=offset)
      
+def gen_highway_layout(G):
+    highway_row = min(G.cross_link_rows, key=lambda x: abs(x - G.chiplet_y_size/2))
+    highway_col = min(G.cross_link_cols, key=lambda x: abs(x - G.chiplet_x_size/2))
+    if highway_col <  G.chiplet_x_size/2:
+        offset = 'right'
+    else:
+        offset = 'left'
+    for y in range(G.array_y_dim):
+        row = y * G.chiplet_y_size + highway_row
+        gen_road_along(G, row=row)
+        
+    for x in range(G.array_x_dim):
+        col = x * G.chiplet_x_size + highway_col
+        gen_road_along(G, col=col, offset=offset)
+        
+    deal_with_undetermined_nodes(G)
 
 
 def draw_lattice(graph, size=8, with_labels=True, border=True, data_color='#99CCFF', highway_color='#004C99'):
@@ -180,4 +226,95 @@ def draw_lattice(graph, size=8, with_labels=True, border=True, data_color='#99CC
         f = plt.figure(figsize=(size,size))
         ids = {node: graph.nodes[node].get('id', node)[-2:] for node in graph.nodes}
         nx.draw(graph, pos={(i,j): (i,j) for i, j in graph.nodes()}, with_labels=with_labels, font_size=8, node_color=node_colors, edgecolors=edgecolors, linewidths=0.5, edge_color=edge_color, width=edge_width)
+
+
+def get_local_coupling_graph(G):
+    if G.local_coupling_graph is None:
+        coupling_graph = G.copy()
+        nodes_to_remove = []
+        for node in G.nodes:
+            if G.nodes[node]['type'] == 'highway':
+                nodes_to_remove.append(node)
+        coupling_graph.remove_nodes_from(nodes_to_remove)
+        for node in coupling_graph.nodes:
+            coupling_graph.nodes[node]['pos'] = node
+        G.local_coupling_graph = CouplingGraph(coupling_graph)
+    return G.local_coupling_graph
+
+
+def get_highway_coupling_graph(G):
+    if G.local_coupling_graph is None:
+        coupling_graph = nx.Graph()
+        highway_qubits = set()
+        for node in G.nodes:
+            if G.nodes[node]['type'] == 'highway':
+                coupling_graph.add_node(node, pos=node)
+                highway_qubits.add(node)
         
+        for node in highway_qubits:
+            neighbors_of_higway_neighbors = set()
+            highway_neighbors_in_1_step = potential_highway_nodes_within_radius(G, node, radius=1)
+            for nei in highway_neighbors_in_1_step:
+                coupling_graph.add_edge(node, nei)
+                neighbors_of_higway_neighbors = neighbors_of_higway_neighbors.union(set(G.neighbors(nei)))
+            highway_neighbors_in_2_step = potential_highway_nodes_within_radius(G, node, radius=2)
+            filtered_highway_neighbors = set(highway_neighbors_in_2_step) - set(highway_neighbors_in_1_step) - neighbors_of_higway_neighbors
+            for nei in filtered_highway_neighbors:
+                coupling_graph.add_edge(node, nei)
+        G.local_coupling_graph = CouplingGraph(coupling_graph)
+    return G.local_coupling_graph
+
+
+def are_regularly_connected(G, node_1, node_2):
+    if get_node_type(G, node_1) == 'highway' or get_node_type(G, node_2) == 'highway':
+        return False
+    else:
+        return G.has_edge(node_1, node_2)
+
+def get_node_type(G, node):
+    return G.nodes[node].get('type')
+
+def get_highway_qubits(G):
+    if G.highway_qubits is None:
+        G.highway_qubits = set([node for node in G.nodes if get_node_type(G, node) == 'highway'])
+    return G.highway_qubits
+
+def is_qubit_next_to_highway(G, node):
+    if get_node_type(G, node) == 'highway':
+        return False
+    for nei in list(G.neighbors(node)):
+        if G.nodes[nei].get('type') == 'highway':
+            return True
+    return False
+
+def qubits_next_to_highway(G):
+    result = set()
+    highway_qubtis = get_highway_qubits(G)
+    for highway_qubit in highway_qubtis:
+        for nei in list(G.neighbors(highway_qubit)):
+            if G.nodes[nei].get('type') == 'data':
+                result.add(nei)
+    return result
+
+
+def get_distance_to_highway(G, node):
+    if G.highway_distance_dict is None: 
+        G.highway_distance_dict = {}
+        for source_node in G.nodes():
+            shortest_paths = nx.single_source_dijkstra_path_length(G, source_node)
+            G.highway_distance_dict[source_node] = min(shortest_paths[highway_qubit] for highway_qubit in get_highway_qubits(G))
+
+    return G.highway_distance_dict[node]
+
+
+        
+def find_possible_entrances_with_paths(G, node, range_beyond_closest=2):
+        max_steps=int(get_distance_to_highway(G, node)) + range_beyond_closest
+        entrance_with_paths = []
+        nearby_entrance_cadidates = set(potential_highway_nodes_within_radius(G, node, radius=max_steps))
+        for entrance in nearby_entrance_cadidates:
+            all_shortest_paths = nx.all_shortest_paths(G, node, entrance)
+            for path in all_shortest_paths:
+                if len(set(path).intersection(get_highway_qubits(G))) == 1:
+                    entrance_with_paths.append((entrance, tuple(path[:-1])))
+        return entrance_with_paths
