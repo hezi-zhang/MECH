@@ -52,39 +52,43 @@ def gen_sparse_chip_links(lattice, rows, cols):
                 edges_to_remove.append((u,v))
     lattice.remove_edges_from(edges_to_remove)
 
-def gen_chiplet_array(geometry, array_x_dim, array_y_dim, chiplet_x_size, chiplet_y_size, cross_link_rows=None, cross_link_cols=None):
+def gen_chiplet_array(geometry, array_x_dim, array_y_dim, chiplet_x_size, chiplet_y_size, cross_link_rows=None, cross_link_cols=None, auto=True):
 
     if geometry == 'square':
         G=gen_square_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
-        G.cross_link_rows = list(range(chiplet_y_size))
-        G.cross_link_cols = list(range(chiplet_x_size))
+        G.cross_link_rows = set(range(chiplet_y_size))
+        G.cross_link_cols = set(range(chiplet_x_size))
     if geometry == 'hexagon':
-        if chiplet_x_size % 2 == 1:
-            print('WARNING: hexagon chiplets should have even columns')
-            chiplet_x_size -= 1
+        if auto:
+            if chiplet_x_size % 2 == 1:
+                print('WARNING: hexagon chiplets should have even columns')
+                chiplet_x_size -= 1
         G=gen_hexagon_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
-        G.cross_link_rows = list(range(chiplet_y_size))
-        G.cross_link_cols = list(range((chiplet_y_size+1)%2,chiplet_x_size,2))
+        G.cross_link_rows = set(range(chiplet_y_size))
+        G.cross_link_cols = set(range((chiplet_y_size+1)%2,chiplet_x_size,2))
     if geometry == 'heavy_square':
-        if chiplet_x_size % 2 == 1:
-            print('WARNING: heavy square chiplets should have even columns')
-            chiplet_x_size -= 1
-        if chiplet_y_size % 2 == 1:
-            print('WARNING: heavy square chiplets should have even rows')
-            chiplet_y_size -= 1
+        if auto:
+            if chiplet_x_size % 2 == 1:
+                print('WARNING: heavy square chiplets should have even columns')
+                chiplet_x_size -= 1
+            if chiplet_y_size % 2 == 1:
+                print('WARNING: heavy square chiplets should have even rows')
+                chiplet_y_size -= 1
         G=gen_heavy_square_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
-        G.cross_link_rows = list(range(0,chiplet_y_size,2))
-        G.cross_link_cols = list(range(0,chiplet_x_size,2))
+        G.cross_link_rows = set(range(0,chiplet_y_size,2))
+        G.cross_link_cols = set(range(0,chiplet_x_size,2))
     if geometry == 'heavy_hexagon':
-        if chiplet_x_size % 4 != 0:
-            print('WARNING: heavy hexagon chiplets should have 4n columns')
-            chiplet_x_size = chiplet_x_size // 4 * 4
-        if chiplet_y_size % 2 == 1:
-            print('WARNING: heavy hexagon chiplets should have even rows')
-            chiplet_y_size -= 1
+        if auto:
+            if chiplet_x_size % 4 != 0:
+                print('WARNING: heavy hexagon chiplets should have 4n columns')
+                chiplet_x_size = chiplet_x_size // 4 * 4
+            if chiplet_y_size % 4 != 0:
+                print('WARNING: heavy hexagon chiplets should have 4n rows')
+                chiplet_y_size = chiplet_y_size // 4 * 4
         G=gen_heavy_hexagon_lattice(array_x_dim * chiplet_x_size, array_y_dim * chiplet_y_size)
-        G.cross_link_rows = list(range(0,chiplet_y_size,2))
-        G.cross_link_cols = list(range(2,chiplet_x_size,4))
+        G.cross_link_rows = set(range(0,chiplet_y_size,2))
+        G.cross_link_cols = set(range(2,chiplet_x_size,4))
+    G.structure = geometry
     G.array_x_dim = array_x_dim
     G.array_y_dim = array_y_dim
     G.chiplet_x_size = chiplet_x_size
@@ -99,15 +103,14 @@ def gen_chiplet_array(geometry, array_x_dim, array_y_dim, chiplet_x_size, chiple
     gen_node_ids(G, chiplet_x_size, chiplet_y_size)
     gen_link_types(G)
     if cross_link_rows:
-        G.cross_link_rows &= cross_link_rows
+        G.cross_link_rows &= set(cross_link_rows)
     if cross_link_cols:
-        G.cross_link_cols &= cross_link_cols
+        G.cross_link_cols &= set(cross_link_cols)
     gen_sparse_chip_links(G,G.cross_link_rows, G.cross_link_cols)
     return G
 
 
 def gen_interleaving_path_between(G, source, target, adhoc_dense=True, offset=None):
-    
     if offset == 'left' or offset == 'down':
         coor_offset = -1
     elif offset == 'right' or offset == 'up':
@@ -186,7 +189,7 @@ def gen_road_along(G, row=None, col=None, offset=None, adhoc_dense=True):
             for array_y in range(bottom_most_id[1], up_most_id[1]+1):
                 # array_x = left_most_id[0]
                 gen_interleaving_path_between(G, (col, array_y * G.chiplet_y_size), (col, (array_y+1) * G.chiplet_y_size -1), offset=offset)
-     
+
 def gen_highway_layout(G):
     highway_row = min(G.cross_link_rows, key=lambda x: abs(x - G.chiplet_y_size/2))
     highway_col = min(G.cross_link_cols, key=lambda x: abs(x - G.chiplet_x_size/2))
@@ -205,7 +208,34 @@ def gen_highway_layout(G):
     deal_with_undetermined_nodes(G)
 
 
-def draw_lattice(graph, size=8, with_labels=True, border=True, data_color='#99CCFF', highway_color='#004C99'):
+def gen_idx_qubit_dict(chiplet):
+    idx_qubit_dict = dict()
+    data_idx, highway_idx = 0, len(get_highway_qubits(chiplet))
+    for node in sorted(chiplet.nodes):
+        if get_node_type(chiplet, node)  == 'data':
+            idx_qubit_dict[data_idx] = node
+            data_idx += 1
+        else:
+            idx_qubit_dict[highway_idx] = node
+            highway_idx += 1
+    return idx_qubit_dict
+
+def gen_qubit_idx_dict(chiplet):
+    qubit_idx_dict = dict()
+    data_idx, highway_idx = 0, len(get_highway_qubits(chiplet))
+    for node in sorted(chiplet.nodes):
+        if get_node_type(chiplet, node)  == 'data':
+            qubit_idx_dict[node] = data_idx
+            data_idx += 1
+        else:
+            qubit_idx_dict[node] = highway_idx
+            highway_idx += 1
+    return qubit_idx_dict
+
+
+def draw_lattice(graph, size=8, node_size=300, with_labels=True, border=True, data_color='#99CCFF', highway_color='#004C99', on_chip_width=1, cross_link_width=8, fig_name=None, save=False):
+        node_lable_dict = gen_qubit_idx_dict(graph)
+        
         node_colors = []
         for node in graph.nodes:
             node_type = graph.nodes[node].get('type', '')
@@ -217,7 +247,7 @@ def draw_lattice(graph, size=8, with_labels=True, border=True, data_color='#99CC
                 node_colors.append(data_color)
 
         edge_color = ['red' if graph.edges[edge].get('type', None) == 'cross_chip' else 'black' for edge in graph.edges]
-        edge_width = [8 if graph.edges[edge].get('type', None) == 'cross_chip' else 1 for edge in graph.edges]
+        edge_width = [cross_link_width if graph.edges[edge].get('type', None) == 'cross_chip' else on_chip_width for edge in graph.edges]
 
         if border:
             edgecolors = ['black' for node in graph.nodes]
@@ -225,7 +255,12 @@ def draw_lattice(graph, size=8, with_labels=True, border=True, data_color='#99CC
             edgecolors = data_color
         f = plt.figure(figsize=(size,size))
         ids = {node: graph.nodes[node].get('id', node)[-2:] for node in graph.nodes}
-        nx.draw(graph, pos={(i,j): (i,j) for i, j in graph.nodes()}, with_labels=with_labels, font_size=8, node_color=node_colors, edgecolors=edgecolors, linewidths=0.5, edge_color=edge_color, width=edge_width)
+        nx.draw(graph, pos={(i,j): (i,j) for i, j in graph.nodes()}, with_labels=with_labels, labels=node_lable_dict, font_size=8, node_size=node_size, node_color=node_colors, edgecolors=edgecolors, linewidths=0.5, edge_color=edge_color, width=edge_width)
+        if save:
+            if fig_name is None:
+                fig_name = '{}x{}_{}x{}_'.format(graph.array_x_dim, graph.array_y_dim, graph.chiplet_x_size, graph.chiplet_y_size) + graph.structure + '_' + data_color
+            print('./figures/'+ fig_name + '.pdf')
+            plt.savefig('./figures/'+ fig_name + '.pdf')
 
 
 def get_local_coupling_graph(G):
@@ -307,7 +342,6 @@ def get_distance_to_highway(G, node):
     return G.highway_distance_dict[node]
 
 
-        
 def find_possible_entrances_with_paths(G, node, range_beyond_closest=2):
         max_steps=int(get_distance_to_highway(G, node)) + range_beyond_closest
         entrance_with_paths = []
