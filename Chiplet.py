@@ -210,7 +210,7 @@ def gen_highway_layout(G):
 
 def gen_idx_qubit_dict(chiplet):
     idx_qubit_dict = dict()
-    data_idx, highway_idx = 0, len(get_highway_qubits(chiplet))
+    data_idx, highway_idx = 0, len(chiplet.nodes) - len(get_highway_qubits(chiplet))
     for node in sorted(chiplet.nodes):
         if get_node_type(chiplet, node)  == 'data':
             idx_qubit_dict[data_idx] = node
@@ -222,7 +222,7 @@ def gen_idx_qubit_dict(chiplet):
 
 def gen_qubit_idx_dict(chiplet):
     qubit_idx_dict = dict()
-    data_idx, highway_idx = 0, len(get_highway_qubits(chiplet))
+    data_idx, highway_idx = 0, len(chiplet.nodes) - len(get_highway_qubits(chiplet))
     for node in sorted(chiplet.nodes):
         if get_node_type(chiplet, node)  == 'data':
             qubit_idx_dict[node] = data_idx

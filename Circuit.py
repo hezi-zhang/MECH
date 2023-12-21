@@ -46,7 +46,6 @@ class MOpNode:
 
 class Circuit: 
     def __init__(self, qubit_num):
-        super().__init__()
         self.qubit_num = qubit_num
         self.circuit_lines = defaultdict(list) # each line contains a list of (node, role)
     def __copy__(self):
@@ -84,7 +83,10 @@ class Circuit:
 
     def is_node_the_same_gate(self, node, control, target):
         if isinstance(node, OpNode):
-            return node.control == control and node.target == target
+            if node.qubit_num == 1:
+                return False
+            else:
+                return node.control == control and node.target == target
         return False
     
     def is_component_contained_in_mop(self, mop, control, target):
@@ -136,7 +138,7 @@ class Circuit:
             if self.is_node_the_same_gate(c_node, control, target) or self.is_component_contained_in_mop(c_node, control, target):
                 if auto_cancellation:
                     return idx
-                elif self.is_component_contained_in_mop(c_node, control, target):
+                elif c_role == 'mc':
                     return earliest_idx
             
             if c_node is None and t_node is None:
@@ -153,6 +155,18 @@ class Circuit:
     @property
     def depth(self):
         return max([len(circuit_line) for circuit_line in self.circuit_lines.values()])
+    
+    def get_mop_depth(self, line):
+        idx = -1
+        for idx in range(self.get_line_depth(line)-1, -1, -1):
+            if self.take_role(line, idx) in {'mc', 'mt'}:
+                break
+        return idx + 1
+
+    @property
+    def mop_depth(self):
+        return max([self.get_mop_depth(line) for line in range(self.qubit_num)])
+
     
     def add_1qubit_op(self, op):
         self.add_node_with_role(op.q, self.get_line_depth(op.q), op, 'q')
