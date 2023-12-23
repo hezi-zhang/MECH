@@ -168,8 +168,12 @@ class Circuit:
         return max([self.get_mop_depth(line) for line in range(self.qubit_num)])
 
     
-    def add_1qubit_op(self, op):
-        self.add_node_with_role(op.q, self.get_line_depth(op.q), op, 'q')
+    def add_1qubit_op(self, op, depth=None):
+        if depth is not None:
+            idx = depth - 1
+        else:
+            idx = self.get_line_depth(op.q)
+        self.add_node_with_role(op.q, idx, op, 'q')
 
 
     def add_2qubit_op(self, op, depth=None, auto_commuting=False, auto_cancellation=False):

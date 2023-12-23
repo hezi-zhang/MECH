@@ -3,6 +3,7 @@ from functools import *
 from numpy import *
 import networkx as nx
 from Chiplet import *
+from Circuit import *
 
 class HighwayOccupancy:
     def __init__(self, G):
@@ -130,9 +131,11 @@ class HighwayManager:
         self.prep_period = prep_period
         self.meas_period = meas_period
         self.highway_schedule = defaultdict(dict) # shuttle idx --> {prep_start_time, exec_start_time, meas_start_time, end_time}
+        self.highway_status_record = []           # record the highway status (which shuttle, which period) at each idx
         self.shuttle_stack = []                   # a list of HighwayOccupancy
-        self.qubit_idx_dict = gen_qubit_idx_dict(self.chiplet_array)
-        self.idx_qubit_dict = gen_idx_qubit_dict(self.chiplet_array)
+        self.qubit_idx_dict = gen_qubit_idx_dict(G)
+        self.idx_qubit_dict = gen_idx_qubit_dict(G)
+
     def __copy__(self):
         new_instance = copy.deepcopy(self)
         return new_instance
@@ -155,74 +158,66 @@ class HighwayManager:
     def set_shuttle_end_time(self, shuttle_idx, time):
         self.highway_schedule[shuttle_idx]['end_time'] = time
 
+    def set_highway_status(self, idx, shuttle_idx, period):
+        assert idx <= len(self.highway_status_record)
+        if idx == len(self.highway_status_record):
+            self.highway_status_record.append((shuttle_idx, period))
+        else:
+            self.highway_status_record[idx] = (shuttle_idx, period)
+    
+    def get_highway_status(self, time):
+        if time < 0 or not self.shuttle_stack:
+            return (-1, None)
+        if time < len(self.highway_status_record):
+            return self.highway_status_record[time]
+        
+        last_shuttle_idx = len(self.shuttle_stack) - 1
+        if self.get_shuttle_end_time(last_shuttle_idx) is None:
+            return (last_shuttle_idx, 'exec')
+        else:
+            return (-1, None)
+
+
     def end_shuttle(self, shuttle_idx, circuit):
-        mop_depth = circuit.mop_depth
-        self.set_shuttle_meas_start_time(shuttle_idx, mop_depth)
-        self.set_shuttle_end_time(shuttle_idx, mop_depth + self.meas_period - 1)
+        exec_start_time = self.get_shuttle_exec_start_time(shuttle_idx)
+        meas_start_time = circuit.mop_depth
+        end_time = meas_start_time + self.meas_period - 1
+        self.set_shuttle_meas_start_time(shuttle_idx, meas_start_time)
+        self.set_shuttle_end_time(shuttle_idx, end_time)
+        for idx in range(exec_start_time, meas_start_time):
+            self.set_highway_status(idx, shuttle_idx, 'exec')
+        for idx in range(meas_start_time, end_time+1):
+            self.set_highway_status(idx, shuttle_idx, 'meas')
 
     def allocate_shuttle(self, circuit):
         if not self.shuttle_stack:
-            start_idx = 0
+            prep_start_idx = 0
             new_shuttle_idx = 0
         else:
             last_shuttle_idx = len(self.shuttle_stack)-1
             self.end_shuttle(last_shuttle_idx, circuit)
-            start_idx = self.get_shuttle_end_time(last_shuttle_idx) + 1
+            prep_start_idx = max(self.get_shuttle_end_time(last_shuttle_idx) + 1, circuit.depth)  #TODO: distinguish data qubits on and off critical paths
             new_shuttle_idx = last_shuttle_idx + 1
 
+        exec_start_time = prep_start_idx + self.prep_period
         self.shuttle_stack.append(HighwayOccupancy(self.chiplet_array))
-        self.set_shuttle_prep_start_time(new_shuttle_idx, start_idx)
-        self.set_shuttle_exec_start_time(new_shuttle_idx, start_idx + self.prep_period)
+        self.set_shuttle_prep_start_time(new_shuttle_idx, prep_start_idx)
+        self.set_shuttle_exec_start_time(new_shuttle_idx, exec_start_time)
         self.set_shuttle_meas_start_time(new_shuttle_idx, None)
         self.set_shuttle_end_time(new_shuttle_idx, None)
-        
+        for idx in range(prep_start_idx, exec_start_time):
+            self.set_highway_status(idx, new_shuttle_idx, 'prep')
+        self.set_highway_status(exec_start_time, new_shuttle_idx, 'exec')
 
-    def which_shuttle(self, target_time):
-        last_shuttle_idx = len(self.shuttle_stack) - 1
-        if last_shuttle_idx < 0:
-            return -1
-        if self.get_shuttle_meas_start_time(last_shuttle_idx) is None and target_time >= self.get_shuttle_prep_start_time(last_shuttle_idx):
-            return last_shuttle_idx
-
-        low, high = 0, len(self.shuttle_stack) - 1
-        while low <= high:
-            mid = (low + high) // 2
-
-            if self.get_shuttle_prep_start_time(mid) <= target_time <= self.get_shuttle_end_time(mid):
-                if target_time < self.get_shuttle_meas_start_time(mid):
-                    return mid
-                elif mid + 1 < len(self.shuttle_stack):
-                    return mid + 1
-                else:
-                    return -1
-            elif target_time < self.get_shuttle_prep_start_time(mid):
-                high = mid - 1
+    def which_shuttle(self, time):
+        shuttle_idx, period = self.get_highway_status(time)
+        if period == 'meas':
+            if shuttle_idx + 1 < len(self.shuttle_stack):
+                return shuttle_idx + 1
             else:
-                low = mid + 1
-        return -1
-    
-    def which_shuttle_exec_period(self, target_time):
-        last_shuttle_idx = len(self.shuttle_stack) - 1
-        if last_shuttle_idx < 0:
-            return -1
-        if self.get_shuttle_meas_start_time(last_shuttle_idx) is None and target_time >= self.get_shuttle_exec_start_time(last_shuttle_idx):
-            return last_shuttle_idx
-
-        low, high = 0, len(self.shuttle_stack) - 1
-        while low <= high:
-            mid = (low + high) // 2
-
-            if self.get_shuttle_exec_start_time(mid) <= target_time < self.get_shuttle_meas_start_time(mid):
-                return mid  # Found a matching interval
-            elif target_time < self.get_shuttle_exec_start_time(mid):
-                high = mid - 1
-            else:
-                low = mid + 1
-        return -1
-    
-    def is_in_exec_period(self, target_time):
-        return self.which_shuttle_exec_period(target_time) >= 0
-    
+                return -1
+        else:
+            return shuttle_idx
     
     def is_entrance_idle_at_idx(self, circuit, shuttle_idx, target_entrance, idx):
         highway_shuttle = self.shuttle_stack[shuttle_idx]
@@ -232,27 +227,6 @@ class HighwayManager:
             if circuit.take_role(line, idx) in {'mc', 'mt'}:
                 return False
         return True
-
-    def get_earliest_entrance_idle_time_on_shuttle(self, circuit, shuttle_idx, target_entrance):
-        exec_start_time = self.get_shuttle_exec_start_time(shuttle_idx)
-        meas_time = self.get_shuttle_meas_start_time(shuttle_idx)
-        if meas_time is not None:
-            latest_idx = meas_time - 1
-        else:
-            latest_idx = circuit.depth - 1
-
-        earliest_idx = None
-        for idx in range(latest_idx, exec_start_time-1, -1):
-            if self.is_entrance_idle_at_idx(circuit, shuttle_idx, target_entrance, idx):
-                earliest_idx = idx
-
-        if earliest_idx is not None:
-            return earliest_idx
-        else:
-            if meas_time is None:
-                return latest_idx + 1
-            else:
-                return -1
             
     def get_earliest_index_for_2qubit_component_on_shuttle(self, shuttle_idx, circuit, op, auto_commuting=True, auto_cancellation=False):
         control, target = op.control, op.target
@@ -260,28 +234,24 @@ class HighwayManager:
         control_qubit, target_qubit = self.idx_qubit_dict[op.control], self.idx_qubit_dict[op.target]
         highway_shuttle = self.shuttle_stack[shuttle_idx]
         if highway_shuttle.source_target_counter[(control_qubit, target_qubit)] > 0:
-            target_entrance = highway_shuttle.target_entrance_dict[op.target]
+            target_entrance = highway_shuttle.target_entrance_dict[target_qubit]
         else:
             path = highway_shuttle.find_free_highway_path(control_qubit, target_qubit)
             if not path:
                 return -1
             target_entrance = path[-2]
 
-        earliest_entrance_idle_idx = self.get_earliest_entrance_idle_time_on_shuttle(circuit, shuttle_idx, target_entrance)
-        if earliest_entrance_idle_idx < 0:
-            return -1
-
+        exec_start_time = self.get_shuttle_exec_start_time(shuttle_idx)
         meas_start_time = self.get_shuttle_meas_start_time(shuttle_idx)
         if meas_start_time is not None:
             latest_idx = meas_start_time - 1
         else:
             latest_idx = max(circuit.get_line_depth(control), circuit.get_line_depth(target))
-            exec_start_time = self.get_shuttle_exec_start_time(shuttle_idx)
             if latest_idx <= exec_start_time:
                 return exec_start_time
         
         earliest_idx = -1
-        for idx in range(latest_idx, -1, -1):
+        for idx in range(latest_idx, exec_start_time-1, -1):
             c_node, c_role = circuit.take_node(control, idx), circuit.take_role(control, idx)
             t_node, t_role = circuit.take_node(target, idx), circuit.take_role(target, idx)
             if circuit.is_node_the_same_gate(c_node, control, target) or circuit.is_component_contained_in_mop(c_node, control, target):
@@ -306,20 +276,100 @@ class HighwayManager:
         return earliest_idx
             
     def get_highway_aware_earliest_index_for_2qubit_component(self, circuit, op, auto_commuting=True, auto_cancellation=False):
+        if not self.shuttle_stack:
+            return -1
         highway_agnostic_earliest_idx = circuit.get_earliest_index_for_2qubit_component(op, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation)
         earliest_shuttle_idx = self.which_shuttle(highway_agnostic_earliest_idx)
-        print('earliest_shuttle = ', earliest_shuttle_idx)
-        for shuttle_idx in range(earliest_shuttle_idx, len(self.shuttle_stack) - 1):
+        for shuttle_idx in range(earliest_shuttle_idx, len(self.shuttle_stack)):
             this_shuttle_possible = True
-            for idx in range(highway_agnostic_earliest_idx, self.get_shuttle_exec_start_time(shuttle_idx), -1):
+            meas_start_time = self.get_shuttle_meas_start_time(shuttle_idx)
+            if meas_start_time is not None:
+                latest_idx = meas_start_time - 1
+            else:
+                latest_idx = highway_agnostic_earliest_idx
+            for idx in range(latest_idx, self.get_shuttle_exec_start_time(shuttle_idx), -1):
                 prior_role = circuit.take_role(op.control, idx - 1)
                 if prior_role not in {None, 'c', 'mc'}:
                     this_shuttle_possible = False
+                    break
 
             if this_shuttle_possible:
                 exec_idx = self.get_earliest_index_for_2qubit_component_on_shuttle(shuttle_idx, circuit, op, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation)
-                
                 if exec_idx >= 0:
                     return exec_idx
         return -1
     
+    def execute_on_highway(self, circuit, op, shuttle_idx=None, exec_idx=None, auto_commuting=True, auto_cancellation=False):
+        if shuttle_idx is None:
+            if exec_idx is None:
+                exec_idx = self.get_highway_aware_earliest_index_for_2qubit_component(circuit, op, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation)
+            shuttle_idx = self.which_shuttle(exec_idx)
+        if shuttle_idx < 0:
+            self.allocate_shuttle(circuit)
+            shuttle_idx = len(self.shuttle_stack) - 1
+            exec_idx = self.get_earliest_index_for_2qubit_component_on_shuttle(shuttle_idx, circuit, op, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation)
+
+        highway_shuttle = self.shuttle_stack[shuttle_idx]
+        
+        control_qubit, target_qubit = self.idx_qubit_dict[op.control], self.idx_qubit_dict[op.target]
+        if highway_shuttle.source_target_counter[(control_qubit, target_qubit)] > 0:
+            highway_shuttle.source_target_counter[(control_qubit, target_qubit)] += 1
+        else:
+            path = highway_shuttle.find_free_highway_path(control_qubit, target_qubit)
+            highway_shuttle.occupy_highway_path(control_qubit, path)
+        depth = exec_idx + 1
+        circuit.add_mop_2qubit_component(op, depth, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation)
+
+    def get_highway_aware_earliest_index_for_1qubit_op(self, circuit, op):
+        line_depth = circuit.get_line_depth(op.q)
+        
+        earliest_idx = -1
+        for idx in range(line_depth, -1, -1):
+            if len(self.shuttle_stack) == 0:
+                is_in_prep_period = False
+            else:
+                shuttle_idx = self.which_shuttle(idx)
+                is_in_prep_period = idx < self.get_shuttle_exec_start_time(shuttle_idx)
+            if circuit.is_position_empty(op.q, idx) and not is_in_prep_period: #TODO: distinguish data qubits on and off critical paths
+                earliest_idx = idx
+        return earliest_idx
+
+    def get_highway_aware_earliest_index_for_2qubit_op(self, circuit, op, auto_commuting, auto_cancellation):
+        control, target = op.control, op.target
+        line_depth = max(circuit.get_line_depth(control), circuit.get_line_depth(target))
+        
+        earliest_idx = -1
+        for idx in range(line_depth, -1, -1):
+            c_node, c_role = circuit.take_node(control, idx), circuit.take_role(control, idx)
+            t_node, t_role = circuit.take_node(target, idx), circuit.take_role(target, idx)
+                
+            if circuit.is_node_the_same_gate(c_node, control, target) or circuit.is_component_contained_in_mop(c_node, control, target):
+                if auto_cancellation:
+                    return idx
+                elif circuit.is_node_the_same_gate(c_node, control, target):
+                    return earliest_idx
+                
+            if len(self.shuttle_stack) == 0:
+                is_in_prep_period = False
+            else:
+                shuttle_idx = self.which_shuttle(idx)
+                is_in_prep_period = idx < self.get_shuttle_exec_start_time(shuttle_idx)
+            
+            if c_node is None and t_node is None and not is_in_prep_period: #TODO: distinguish data qubits on and off critical paths
+                earliest_idx = idx
+            elif not auto_commuting or c_role not in {None, 'c', 'mc'} or t_role not in {None, 't', 'mt'}:
+                break # not commutable
+        return earliest_idx
+            
+    def execute_on_local(self, circuit, op, auto_commuting=True, auto_cancellation=False):
+        if op.qubit_num == 1:
+            earliest_idx = self.get_highway_aware_earliest_index_for_1qubit_op(circuit, op)
+            if earliest_idx < 0:
+                earliest_idx = self.get_shuttle_exec_start_time(len(self.shuttle_stack)-1)
+            circuit.add_1qubit_op(op, depth=earliest_idx + 1)
+        else:
+            earliest_idx = self.get_highway_aware_earliest_index_for_2qubit_op(circuit, op, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation)
+            if earliest_idx < 0:
+                earliest_idx = self.get_shuttle_exec_start_time(len(self.shuttle_stack)-1)
+            circuit.add_2qubit_op(op, depth=earliest_idx + 1)
+        
