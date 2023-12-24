@@ -201,7 +201,10 @@ class HighwayManager:
         else:
             last_shuttle_idx = len(self.shuttle_stack)-1
             self.end_shuttle(last_shuttle_idx, circuit)
+            last_end_idx = self.get_shuttle_end_time(last_shuttle_idx)
             prep_start_idx = max(self.get_shuttle_end_time(last_shuttle_idx) + 1, circuit.depth)  #TODO: distinguish data qubits on and off critical paths
+            for idx in range(last_end_idx, prep_start_idx):
+                self.set_highway_status(idx, -1, 'local')
             new_shuttle_idx = last_shuttle_idx + 1
 
         exec_start_time = prep_start_idx + self.prep_period
@@ -216,7 +219,7 @@ class HighwayManager:
 
     def which_shuttle(self, time):
         shuttle_idx, period = self.get_highway_status(time)
-        if period == 'meas':
+        if period in {'meas', 'local'}:
             if shuttle_idx + 1 < len(self.shuttle_stack):
                 return shuttle_idx + 1
             else:
