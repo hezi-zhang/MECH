@@ -106,12 +106,13 @@ class Circuit:
             if not c_node.indiv:
                 self.delete_node_with_role(control, idx)
 
-    def get_earliest_index_for_2qubit_op(self, op, auto_commuting, auto_cancellation):
+    def get_earliest_index_for_2qubit_op(self, op, auto_commuting, auto_cancellation, min_idx=0, max_idx=None, addition_condition=lambda idx: True):
         control, target = op.control, op.target
-        line_depth = max(self.get_line_depth(control), self.get_line_depth(target))
+        if max_idx is None:
+            max_idx = max(self.get_line_depth(control), self.get_line_depth(target))
         
-        earliest_idx = line_depth
-        for idx in range(line_depth-1, -1, -1):
+        earliest_idx = -1
+        for idx in range(max_idx, min_idx-1, -1):
             c_node, c_role = self.take_node(control, idx), self.take_role(control, idx)
             t_node, t_role = self.take_node(target, idx), self.take_role(target, idx)
                 
@@ -121,18 +122,19 @@ class Circuit:
                 elif self.is_node_the_same_gate(c_node, control, target):
                     return earliest_idx
                 
-            if c_node is None and t_node is None:
+            if c_node is None and t_node is None and addition_condition(idx):
                 earliest_idx = idx
             elif not auto_commuting or c_role not in {None, 'c', 'mc'} or t_role not in {None, 't', 'mt'}:
                 break # not commutable
         return earliest_idx
     
-    def get_earliest_index_for_2qubit_component(self, op, auto_commuting, auto_cancellation):
+    def get_earliest_index_for_2qubit_component(self, op, auto_commuting, auto_cancellation, min_idx=0, max_idx=None, addition_condition=lambda idx: True):
         control, target = op.control, op.target
-        line_depth = max(self.get_line_depth(control), self.get_line_depth(target))
+        if max_idx is None:
+            max_idx = max(self.get_line_depth(control), self.get_line_depth(target))
         
-        earliest_idx = line_depth
-        for idx in range(line_depth-1, -1, -1):
+        earliest_idx = -1
+        for idx in range(max_idx, min_idx-1, -1):
             c_node, c_role = self.take_node(control, idx), self.take_role(control, idx)
             t_node, t_role = self.take_node(target, idx), self.take_role(target, idx)
             if self.is_node_the_same_gate(c_node, control, target) or self.is_component_contained_in_mop(c_node, control, target):
@@ -141,9 +143,9 @@ class Circuit:
                 elif c_role == 'mc':
                     return earliest_idx
             
-            if c_node is None and t_node is None:
+            if c_node is None and t_node is None and addition_condition(idx):
                 earliest_idx = idx
-            elif c_role == 'mc' and t_node is None:
+            elif c_role == 'mc' and t_node is None and addition_condition(idx):
                 if not auto_commuting:
                     return idx
                 else:
