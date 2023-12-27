@@ -156,6 +156,8 @@ class Circuit:
         
     @property
     def depth(self):
+        if not self.circuit_lines:
+            return 0
         return max([len(circuit_line) for circuit_line in self.circuit_lines.values()])
     
     def get_mop_depth(self, line):

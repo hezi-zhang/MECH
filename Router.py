@@ -22,11 +22,14 @@ class Router:
         self._v2p[v1], self._v2p[v2] = p2, p1
 
     def swap_along_path_unless_encoutering_control(self, path, p_control=None):
+        blocked_by_p_control = False
         for step in range(1, len(path)):
             from_qubit, to_qubit = path[step-1], path[step]
             if to_qubit == p_control:
+                blocked_by_p_control = True
                 break
             self.swap(from_qubit, to_qubit)
+        return blocked_by_p_control
 
     def expected_arrival_depth(self, path):
         arrival_depth = 0
@@ -49,13 +52,14 @@ class Router:
             assert get_distance_to_highway(self.chip, self._v2p[v_control])
 
         # move target qubits to highway from near to far
+        blocked_by_p_control = False
         while remaining_v_targets:
             nearest_target = min(remaining_v_targets, key=lambda v_target: get_distance_to_highway(self.chip, self._v2p[v_target]))
             p_control, p_nearest_target = self._v2p[v_control], self._v2p[nearest_target]
             if not is_qubit_next_to_highway(self.chip, p_nearest_target): #TODO: exclude the highway entrance occupied by control
                 entrances_with_paths = find_possible_entrances_with_paths(self.chip, p_nearest_target) #!TODO: don't occupy the position of control qubit!
                 best_entrance, best_path = min(entrances_with_paths, key=lambda entrances_with_path: self.expected_arrival_depth(entrances_with_path[1]))
-                self.swap_along_path_unless_encoutering_control(best_path, p_control)
+                blocked_by_p_control = self.swap_along_path_unless_encoutering_control(best_path, p_control)
                 
                 assert self._v2p[v_control] == p_control
                 p_nearest_target = best_path[-1]
@@ -63,6 +67,9 @@ class Router:
             p_control, p_nearest_target = self._v2p[v_control], self._v2p[nearest_target]
             line1, line2 = self.highway_manager.qubit_idx_dict[p_control], self.highway_manager.qubit_idx_dict[p_nearest_target]
             
-            self.highway_manager.execute_on_highway(self.circuit, OpNode(line1, line2))
+            if blocked_by_p_control:
+                self.highway_manager.execute_on_local(self.circuit, OpNode(line1, line2))
+            else:
+                self.highway_manager.execute_on_highway(self.circuit, OpNode(line1, line2))
             remaining_v_targets.remove(nearest_target)
 

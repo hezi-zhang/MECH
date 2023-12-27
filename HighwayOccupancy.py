@@ -196,16 +196,17 @@ class HighwayManager:
         # 1. after the last shuttle
         # 2. after all gates on the control qubit and data qubits in the critical paths
         if not self.shuttle_stack:
-            prep_start_idx = 0
+            prep_start_idx = circuit.depth #TODO: distinguish data qubits on and off critical paths
+            last_end_idx = -1
             new_shuttle_idx = 0
         else:
             last_shuttle_idx = len(self.shuttle_stack)-1
             self.end_shuttle(last_shuttle_idx, circuit)
             last_end_idx = self.get_shuttle_end_time(last_shuttle_idx)
             prep_start_idx = max(self.get_shuttle_end_time(last_shuttle_idx) + 1, circuit.depth)  #TODO: distinguish data qubits on and off critical paths
-            for idx in range(last_end_idx, prep_start_idx):
-                self.set_highway_status(idx, -1, 'local')
             new_shuttle_idx = last_shuttle_idx + 1
+        for idx in range(last_end_idx+1, prep_start_idx):
+            self.set_highway_status(idx, -1, 'local')
 
         exec_start_time = prep_start_idx + self.prep_period
         self.shuttle_stack.append(HighwayOccupancy(self.chiplet_array))
