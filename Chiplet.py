@@ -109,6 +109,104 @@ def gen_chiplet_array(geometry, array_x_dim, array_y_dim, chiplet_x_size, chiple
     gen_sparse_chip_links(G,G.cross_link_rows, G.cross_link_cols)
     return G
 
+def get_node_type(G, node):
+    return G.nodes[node].get('type')
+
+def get_highway_qubits(G):
+    if G.highway_qubits is None:
+        G.highway_qubits = set([node for node in G.nodes if get_node_type(G, node) == 'highway'])
+    return G.highway_qubits
+
+def potential_highway_nodes_within_radius(G, node, radius):
+    neighborhood = nx.ego_graph(G, node, radius=radius, center=False)
+    filtered_nodes = [node for node in neighborhood.nodes if G.nodes[node].get('type') in {'highway', 'undetermined'}]
+    return filtered_nodes
+
+def get_local_coupling_graph(G):
+    if G.local_coupling_graph is None:
+        coupling_graph = G.copy()
+        nodes_to_remove = []
+        for node in G.nodes:
+            if G.nodes[node]['type'] == 'highway':
+                nodes_to_remove.append(node)
+        coupling_graph.remove_nodes_from(nodes_to_remove)
+        for node in coupling_graph.nodes:
+            coupling_graph.nodes[node]['pos'] = node
+        G.local_coupling_graph = CouplingGraph(coupling_graph)
+    return G.local_coupling_graph
+
+def get_highway_coupling_graph(G, refresh=False):
+    if refresh or G.highway_coupling_graph is None:
+        coupling_graph = nx.Graph()
+        highway_qubits = set()
+        for node in G.nodes:
+            if get_node_type(G, node) in {'highway', 'undetermined'}:
+                coupling_graph.add_node(node, pos=node)
+                highway_qubits.add(node)
+        
+        for node in highway_qubits:
+            neighbors_of_higway_neighbors = set()
+            highway_neighbors_in_1_step = potential_highway_nodes_within_radius(G, node, radius=1)
+            for nei in highway_neighbors_in_1_step:
+                coupling_graph.add_edge(node, nei, weight=1)
+                neighbors_of_higway_neighbors = neighbors_of_higway_neighbors.union(set(G.neighbors(nei)))
+            highway_neighbors_in_2_step = potential_highway_nodes_within_radius(G, node, radius=2)
+            filtered_highway_neighbors = set(highway_neighbors_in_2_step) - set(highway_neighbors_in_1_step) - neighbors_of_higway_neighbors
+            for nei in filtered_highway_neighbors:
+                coupling_graph.add_edge(node, nei, weight=2)
+        G.highway_coupling_graph = CouplingGraph(coupling_graph)
+    return G.highway_coupling_graph
+
+def get_unsatisfying_highway_coupling_nodes(graph):
+        unsatisfying_nodes = set()
+        for node in graph.nodes:
+            if graph.degree(node) >= 3:
+                interleaved_neighbors = [nei for nei in graph.neighbors(node) if graph.edges[(node, nei)]['weight'] > 1]
+                if len(interleaved_neighbors) > 2:
+                    unsatisfying_nodes.add(node)
+        return unsatisfying_nodes
+
+def gen_efficient_highway_coupling_graph(G):
+    graph = get_highway_coupling_graph(G, refresh=True).graph
+    multi_degree_nodes = set([node for node in graph.nodes if graph.degree(node) >= 3])
+    residual_subgraph = nx.subgraph(graph, set(graph.nodes) - multi_degree_nodes).copy()
+    unsatisfying_subgraph = nx.Graph()
+    for node in multi_degree_nodes:
+        for nei in graph.neighbors(node):
+            unsatisfying_subgraph.add_edge(node, nei)
+
+    for component in nx.connected_components(unsatisfying_subgraph):
+        left_most_node, right_most_node = min(component, key=lambda pos: pos[0]), max(component, key=lambda pos: pos[0])
+        bottom_most_node, up_most_node = min(component, key=lambda pos: pos[1]), max(component, key=lambda pos: pos[1])
+        horizontal_paths = nx.all_shortest_paths(graph, left_most_node, right_most_node, weight='weight')
+        vertical_paths = nx.all_shortest_paths(graph, bottom_most_node, up_most_node, weight='weight')
+
+        success = False
+        for h_path in horizontal_paths:
+            for v_path in vertical_paths:
+                crossroad_subgraph = nx.Graph()
+                for idx in range(1, len(h_path)):
+                    crossroad_subgraph.add_edge(h_path[idx-1], h_path[idx], weight=graph.edges[(h_path[idx-1], h_path[idx])]['weight'])
+                for idx in range(1, len(v_path)):
+                    crossroad_subgraph.add_edge(v_path[idx-1], v_path[idx], weight=graph.edges[(v_path[idx-1], v_path[idx])]['weight'])
+                for n1 in [left_most_node, right_most_node]:
+                    for n2 in [bottom_most_node, up_most_node]:
+                        if not nx.has_path(crossroad_subgraph, n1, n2):
+                            subgraph = nx.subgraph(graph, crossroad_subgraph.nodes)
+                            path = nx.shortest_path(subgraph, n1, n2)
+                            for idx in range(1, len(path)):
+                                crossroad_subgraph.add_edge(path[idx-1], path[idx], weight=graph.edges[(path[idx-1], path[idx])]['weight'])
+                if not get_unsatisfying_highway_coupling_nodes(crossroad_subgraph):
+                    residual_subgraph.add_edges_from(crossroad_subgraph.edges)
+                    success = True
+                    break
+            if success:
+                break
+        if not success:
+            return None
+    for edge in residual_subgraph.edges:
+        residual_subgraph.edges[edge]['weight'] = graph.edges[edge]['weight']
+    return CouplingGraph(residual_subgraph)
 
 def gen_interleaving_path_between(G, source, target, adhoc_dense=True, offset=None):
     if offset == 'left' or offset == 'down':
@@ -119,55 +217,30 @@ def gen_interleaving_path_between(G, source, target, adhoc_dense=True, offset=No
         coor_offset = 0
     all_shortest_paths = list(nx.all_shortest_paths(G, source, target))
     shortest_path = min(all_shortest_paths, key=lambda path: sum(abs(x-(source[0] + 0.5*coor_offset)) for x,_ in path))
-    
-    even_flag = 1
-    for snode in shortest_path:
-        if 'used_times' in G.nodes[snode].keys():
-            G.nodes[snode]['used_times'] = G.nodes[snode]['used_times'] + 1
-        else:
-            G.nodes[snode]['used_times'] = 1
-        cross_chip_flag = 0
-        for neigh_node in G.neighbors(snode):
-            if G[snode][neigh_node]['type'] == 'cross_chip':
-                cross_chip_flag = 1
-                break  
+    left_pointer, right_pointer = 0, len(shortest_path) - 1
+
+    while right_pointer - left_pointer >= 2:
+        left_node, right_node = shortest_path[left_pointer], shortest_path[right_pointer]
+        if get_node_type(G, left_node) == 'data':
+            G.nodes[left_node]['type'] = 'highway'
+        if get_node_type(G, right_node) == 'data':
+            G.nodes[right_node]['type'] = 'highway'
         
-        if cross_chip_flag:
-            G.nodes[snode]['type'] = 'highway'
-        
-        if even_flag:
-            G.nodes[snode]['type'] = 'highway'
-            even_flag = 0
+        if right_pointer - 2 < left_pointer + 2:
+            break
         else:
-            if G.nodes[snode]['type'] == 'data':
-                even_flag = 1
-    begin_node = shortest_path[0]
-    end_node = shortest_path[-1]
-    G.nodes[begin_node]['type'] = 'highway'
-    G.nodes[end_node]['type'] = 'highway'
-    return
+            left_pointer += 2
+            right_pointer -= 2
 
+    left_node, right_node = shortest_path[left_pointer], shortest_path[right_pointer]
+    if get_node_type(G, left_node) == 'data':
+        G.nodes[left_node]['type'] = 'highway'
+    if get_node_type(G, right_node) == 'data':
+        G.nodes[right_node]['type'] = 'highway'
 
-def potential_highway_nodes_within_radius(G, node, radius):
-    neighborhood = nx.ego_graph(G, node, radius=radius, center=False)
-    filtered_nodes = [node for node in neighborhood.nodes if G.nodes[node].get('type') in {'highway', 'undetermined'}]
-    return filtered_nodes
-
-def deal_with_undetermined_nodes(G, adhoc_dense=True):
-    for node in G.nodes:
-        if G.nodes[node]['type'] == 'highway':
-            index = 0
-            for neigh_node in G.neighbors(node):
-                if G.nodes[neigh_node]['type'] == 'highway':
-                    index += 1
-            if index >= G.nodes[node]['used_times'] * 2:
-                cross_chip_flag = 0
-                for neigh_node in G.neighbors(node):
-                    if G[node][neigh_node]['type'] == 'cross_chip':
-                        cross_chip_flag = 1
-                        break
-                if cross_chip_flag == 0:  
-                    G.nodes[node]['type'] = 'data'
+    if right_pointer - left_pointer != 1:
+        G.nodes[shortest_path[left_pointer+1]]['type'] = 'undetermined'
+        G.nodes[shortest_path[right_pointer-1]]['type'] = 'undetermined'
 
 def gen_road_along(G, row=None, col=None, offset=None, adhoc_dense=True):
     max_x, max_y = G.array_x_dim * G.chiplet_x_size, G.array_y_dim * G.chiplet_y_size
@@ -190,6 +263,39 @@ def gen_road_along(G, row=None, col=None, offset=None, adhoc_dense=True):
                 # array_x = left_most_id[0]
                 gen_interleaving_path_between(G, (col, array_y * G.chiplet_y_size), (col, (array_y+1) * G.chiplet_y_size -1), offset=offset)
 
+def deal_with_undetermined_nodes(G, adhoc_dense=True):
+    for node in G.nodes:
+        if G.nodes[node]['type'] == 'undetermined':
+            neighborhood = potential_highway_nodes_within_radius(G, node, 2)
+            for nei in neighborhood:
+                if not adhoc_dense:
+                    x, y = nei
+                    max_x, max_y = G.array_x_dim * G.chiplet_x_size, G.array_y_dim * G.chiplet_y_size
+                else:
+                    x, y = G.nodes[nei]['id'][-2:]
+                    max_x, max_y = G.chiplet_x_size, G.chiplet_y_size
+                is_on_edge = x==0 or x==max_x-1 or y==0 or y==max_y-1
+
+                if G.nodes[nei]['type'] == 'highway':
+                    least_neighbors = 2 - is_on_edge + 1
+                if G.nodes[nei]['type'] == 'undetermined':
+                    least_neighbors = 4 - is_on_edge
+                # print(nei, is_on_edge, len(potential_highway_nodes_within_radius(G, nei, 2)), least_neighbors)
+                if len(potential_highway_nodes_within_radius(G, nei, 2)) < least_neighbors:
+                        G.nodes[node]['type'] = 'highway'
+                        break
+                else:
+                    neighborhood = potential_highway_nodes_within_radius(G, nei, 2)
+                    neighborhood.remove(node)
+                    this_row = [n for n in neighborhood if n[1] == nei[1]]
+                    if len(this_row) == 1:
+                        G.nodes[node]['type'] = 'highway'
+                        break
+            if G.nodes[node]['type'] == 'undetermined': 
+                G.nodes[node]['type'] = 'data' 
+                if gen_efficient_highway_coupling_graph(G)is None:
+                    G.nodes[node]['type'] = 'highway'
+
 def gen_highway_layout(G):
     highway_row = min(G.cross_link_rows, key=lambda x: abs(x - G.chiplet_y_size/2))
     highway_col = min(G.cross_link_cols, key=lambda x: abs(x - G.chiplet_x_size/2))
@@ -206,6 +312,9 @@ def gen_highway_layout(G):
         gen_road_along(G, col=col, offset=offset)
         
     deal_with_undetermined_nodes(G)
+    efficient_highway_coupling_graph = gen_efficient_highway_coupling_graph(G)
+    if efficient_highway_coupling_graph is not None:
+        G.highway_coupling_graph = efficient_highway_coupling_graph
 
 
 def gen_idx_qubit_dict(chiplet):
@@ -263,56 +372,11 @@ def draw_lattice(graph, size=8, node_size=300, with_labels=True, border=True, da
             plt.savefig('./figures/'+ fig_name + '.pdf')
 
 
-def get_local_coupling_graph(G):
-    if G.local_coupling_graph is None:
-        coupling_graph = G.copy()
-        nodes_to_remove = []
-        for node in G.nodes:
-            if G.nodes[node]['type'] == 'highway':
-                nodes_to_remove.append(node)
-        coupling_graph.remove_nodes_from(nodes_to_remove)
-        for node in coupling_graph.nodes:
-            coupling_graph.nodes[node]['pos'] = node
-        G.local_coupling_graph = CouplingGraph(coupling_graph)
-    return G.local_coupling_graph
-
-
-def get_highway_coupling_graph(G):
-    if G.local_coupling_graph is None:
-        coupling_graph = nx.Graph()
-        highway_qubits = set()
-        for node in G.nodes:
-            if G.nodes[node]['type'] == 'highway':
-                coupling_graph.add_node(node, pos=node)
-                highway_qubits.add(node)
-        
-        for node in highway_qubits:
-            neighbors_of_higway_neighbors = set()
-            highway_neighbors_in_1_step = potential_highway_nodes_within_radius(G, node, radius=1)
-            for nei in highway_neighbors_in_1_step:
-                coupling_graph.add_edge(node, nei)
-                neighbors_of_higway_neighbors = neighbors_of_higway_neighbors.union(set(G.neighbors(nei)))
-            highway_neighbors_in_2_step = potential_highway_nodes_within_radius(G, node, radius=2)
-            filtered_highway_neighbors = set(highway_neighbors_in_2_step) - set(highway_neighbors_in_1_step) - neighbors_of_higway_neighbors
-            for nei in filtered_highway_neighbors:
-                coupling_graph.add_edge(node, nei)
-        G.local_coupling_graph = CouplingGraph(coupling_graph)
-    return G.local_coupling_graph
-
-
 def are_regularly_connected(G, node_1, node_2):
     if get_node_type(G, node_1) == 'highway' or get_node_type(G, node_2) == 'highway':
         return False
     else:
         return G.has_edge(node_1, node_2)
-
-def get_node_type(G, node):
-    return G.nodes[node].get('type')
-
-def get_highway_qubits(G):
-    if G.highway_qubits is None:
-        G.highway_qubits = set([node for node in G.nodes if get_node_type(G, node) == 'highway'])
-    return G.highway_qubits
 
 def is_qubit_next_to_highway(G, node):
     if get_node_type(G, node) == 'highway':

@@ -24,5 +24,5 @@ class CouplingGraph:
         
     def draw(self, size=5, with_labels=False):
         f = plt.figure(figsize=(size,size))
-        nx.draw(self.graph, pos=nx.get_node_attributes(self.graph, 'pos'), with_labels=with_labels, node_size=100, font_size=6, node_color=['pink' for node in self.graph.nodes])
+        nx.draw(self.graph, pos={node: node for node in self.graph.nodes}, with_labels=with_labels, node_size=100, font_size=6, node_color=['pink' for node in self.graph.nodes])
     
