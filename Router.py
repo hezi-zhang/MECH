@@ -1,3 +1,4 @@
+from math import *
 from Chiplet import *
 from Circuit import *
 from HighwayOccupancy import *
@@ -5,8 +6,7 @@ from HighwayOccupancy import *
 class Router:
     def __init__(self, chip, initial_v2p=None, circuit=None, highway_manager=None, prep_period=2, meas_period=2):
         self.chip = chip
-        data_qubit_num = len(chip.nodes) - len(chip.highway_qubits)
-        self.circuit = Circuit(data_qubit_num) if circuit is None else circuit
+        self.circuit = Circuit(len(chip.nodes)) if circuit is None else circuit
         self.highway_manager = HighwayManager(chip, prep_period, meas_period) if highway_manager is None else highway_manager
         self._v2p = self.highway_manager.idx_qubit_dict.copy() if initial_v2p is None else initial_v2p
         self._p2v = {p:v for v,p in self._v2p.items()}

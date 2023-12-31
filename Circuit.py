@@ -70,7 +70,7 @@ class Circuit:
         return idx > self.get_line_depth(line) - 1 or self.take_node(line, idx) is None
     
     def add_node_with_role(self, line, idx, node, role):
-        assert self.is_position_empty(line, idx), "Failed to add {} to ({},{}) because the position is already taken".format(line, idx, node)
+        assert self.is_position_empty(line, idx), "Failed to add {} to ({},{}) because the position is already taken".format(node, line, idx)
         node.depth = idx + 1
         for i in range(self.get_line_depth(line), idx+1):
             self.circuit_lines[line].append(None)
@@ -180,9 +180,9 @@ class Circuit:
         self.add_node_with_role(op.q, idx, op, 'q')
 
 
-    def add_2qubit_op(self, op, depth=None, auto_commuting=False, auto_cancellation=False):
+    def add_2qubit_op(self, op, depth=None, auto_commuting=False, auto_cancellation=False, min_idx=0, max_idx=None):
         if depth is None:
-            earliest_idx = self.get_earliest_index_for_2qubit_op(op, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation)
+            earliest_idx = self.get_earliest_index_for_2qubit_op(op, auto_commuting=auto_commuting, auto_cancellation=auto_cancellation, min_idx=min_idx, max_idx=max_idx)
         else:
             earliest_idx = depth - 1
 
@@ -260,7 +260,10 @@ class Circuit:
                 return op_repr
                 
         represened_lines = []
-        max_len = max([len(circuit_line) for circuit_line in self.circuit_lines.values()])
+        if not self.circuit_lines:
+            max_len = 0
+        else:
+            max_len = max([len(circuit_line) for circuit_line in self.circuit_lines.values()])
         for line in range(self.qubit_num):
             circuit_line_len = len(self.circuit_lines[line])
             l=[get_node_repr_on_line(self.take_node(line, i), line) for i in range(circuit_line_len)] + [' ' for i in range(max_len - circuit_line_len)]
