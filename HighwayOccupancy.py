@@ -341,3 +341,101 @@ class HighwayManager:
                 earliest_idx = self.get_shuttle_exec_start_time(len(self.shuttle_stack)-1)
             circuit.add_2qubit_op(op, depth=earliest_idx + 1)
         
+    def bridge(self, circuit, shuttle_idx, control_qubit, target_qubit, mid=None, auto_commuting=True):
+        distance = abs(control_qubit[0] - target_qubit[0]) + abs(control_qubit[1] - target_qubit[1])
+        assert distance <= 2
+
+        earliest_idx = self.get_shuttle_prep_start_time(shuttle_idx)
+        latest_idx = self.get_shuttle_exec_start_time(shuttle_idx) - 1
+        control_line, target_line = self.qubit_idx_dict[control_qubit], self.qubit_idx_dict[target_qubit]
+        if distance == 1:
+            circuit.add_2qubit_op(OpNode(control_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
+        else:
+            if mid is None:
+                mid = nx.shortest_path(self.chiplet_array, control_qubit, target_qubit)[1]
+            
+            mid_line = self.qubit_idx_dict[mid]
+            circuit.add_2qubit_op(OpNode(mid_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
+            circuit.add_2qubit_op(OpNode(control_line, mid_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
+            circuit.add_2qubit_op(OpNode(mid_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
+            circuit.add_2qubit_op(OpNode(control_line, mid_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
+
+    def bridge_highway_path(self, circuit, shuttle_idx, source, target):
+        highway_coupling_graph = get_highway_coupling_graph(self.chiplet_array)
+        path = nx.shortest_path(highway_coupling_graph.graph, source, target)
+        next_to_source, next_to_target = path[1], path[-2]
+        if len(path) % 2 == 0:
+            if abs(next_to_source[0] - source[0]) + abs(next_to_source[1] - source[1]) <= abs(next_to_target[0] - target[0]) + abs(next_to_target[1] - target[1]):
+                self.bridge(circuit, shuttle_idx, source, next_to_source)
+                path = path[1:]
+            else:
+                self.bridge(circuit, shuttle_idx, target, next_to_target)
+                path = path[-2:-1:-1]
+
+        measured_qubits = set()
+        for i in range(0, len(path) - 1, 2):
+            node1, node2, node3 = path[i], path[i+1], path[i+2]
+            self.bridge(circuit, shuttle_idx, node1, node2)
+            self.bridge(circuit, shuttle_idx, node3, node2)
+            mid_line = self.qubit_idx_dict[node2]
+            mid_line_depth = circuit.get_line_depth(mid_line)
+            circuit.add_1qubit_op(OpNode(mid_line), depth=mid_line_depth + self.meas_period)
+            measured_qubits.add(node2)
+        return measured_qubits
+        
+    def bridge_throughout_highway(self, circuit, shuttle_idx):
+        if self.chiplet_array.structure in ['square', 'heavy_square']:
+            nearest_num = 4
+        if self.chiplet_array.structure in ['hexagon', 'heavy_hexagon']:
+            nearest_num = 3
+
+        visited = set()
+        graph = get_highway_coupling_graph(self.chiplet_array).graph
+        occupied_subgraph = nx.subgraph(graph, self.shuttle_stack[shuttle_idx].occupied_highway_qubits)
+        multi_degree_nodes_in_orginal_graph = [node for node in occupied_subgraph.nodes if graph.degree(node) >= 3]
+        leaf_nodes_in_occupied_subgraph = [node for node in graph if occupied_subgraph.degree(node) == 1]
+        key_nodes = set(multi_degree_nodes_in_orginal_graph + leaf_nodes_in_occupied_subgraph)
+
+        measured_qubits = set()
+        for node in key_nodes:
+            nearest_key_nodes = sorted(key_nodes, key=lambda n: abs(n[0] - node[0]) + abs(n[1] - node[1]))[1 : 1 + nearest_num]
+            for near in nearest_key_nodes:
+                path = nx.shortest_path(occupied_subgraph, node, near)
+                if not set(path[1:-1]).intersection(key_nodes):
+                    pair = tuple(sorted([node, near]))
+                    if pair not in visited:
+                        measured_on_path = self.bridge_highway_path(circuit, shuttle_idx, node, near)
+                        measured_qubits |= measured_on_path
+                        visited.add(pair)
+        return measured_qubits
+    
+    def reentangle_throughout_highway(self, circuit, shuttle_idx, measured_qubits):
+        graph = get_highway_coupling_graph(self.chiplet_array).graph
+        shuttle_prep_start_time = self.get_shuttle_prep_start_time(shuttle_idx)
+        shuttle_exec_start_time = self.get_shuttle_exec_start_time(shuttle_idx)
+
+        def op_num(node):
+            line = self.qubit_idx_dict[node]
+            circuit_line = circuit.circuit_lines[line][shuttle_prep_start_time : shuttle_exec_start_time]
+            op_list = [op for op in circuit_line if op is not None]
+            return len(op_list)
+
+        for qubit in measured_qubits:
+            if qubit not in self.shuttle_stack[shuttle_idx].entrance_data_dict.keys():
+                continue
+            neighbors = list(graph.neighbors(qubit))
+            nearest_neighbor = min(neighbors, key=lambda nei: abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]))
+            nearest_neighbor_distance = abs(nearest_neighbor[0] - qubit[0]) + abs(nearest_neighbor[1] - qubit[1])
+            all_nearest_neighbors = [nei for nei in neighbors if abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]) ==  nearest_neighbor_distance]
+            best_neighbor = min(all_nearest_neighbors, key=lambda nei: op_num(nei))
+            self.bridge(circuit, shuttle_idx, best_neighbor, qubit)
+
+    def measure_throughout_highway(self, circuit, shuttle_idx):
+        shuttle_end_time = self.get_shuttle_end_time(shuttle_idx)
+        if shuttle_end_time is None:
+            self.end_shuttle(shuttle_idx, circuit)
+            shuttle_end_time = self.get_shuttle_end_time(shuttle_idx)
+        for qubit in self.shuttle_stack[shuttle_idx].occupied_highway_qubits:
+            line = self.qubit_idx_dict[qubit]
+            circuit.add_1qubit_op(OpNode(line), depth=shuttle_end_time + 1)
+

@@ -1,4 +1,3 @@
-from math import *
 from Chiplet import *
 from Circuit import *
 from HighwayOccupancy import *
