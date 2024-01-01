@@ -259,7 +259,6 @@ class HighwayManager:
         for idx in range(latest_idx, exec_start_time, -1):
             prior_role = circuit.take_role(op.control, idx - 1)
             if prior_role not in {None, 'c', 'mc'}: # control data has been changed
-                print(op, 'impossible: ', shuttle_idx)
                 return -1
         
         # check entrance availability
@@ -339,7 +338,6 @@ class HighwayManager:
             circuit.add_2qubit_op(op, depth=earliest_idx + 1)
         
     def bridge(self, circuit, shuttle_idx, control_qubit, target_qubit, mid=None, auto_commuting=True):
-        print('bridging ', self.qubit_idx_dict[control_qubit], self.qubit_idx_dict[target_qubit])
         distance = abs(control_qubit[0] - target_qubit[0]) + abs(control_qubit[1] - target_qubit[1])
         assert distance <= 2
 
@@ -353,14 +351,12 @@ class HighwayManager:
                 mid = nx.shortest_path(self.chiplet_array, control_qubit, target_qubit)[1]
             
             mid_line = self.qubit_idx_dict[mid]
-            print('mid = {}, mid_line = {}, control_line = {}, target_line = {}, earliest_idx = {}, latest_idx = {}'.format(self.qubit_idx_dict[mid], mid_line, control_line, target_line, earliest_idx, latest_idx))
             circuit.add_2qubit_op(OpNode(mid_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
             circuit.add_2qubit_op(OpNode(control_line, mid_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
             circuit.add_2qubit_op(OpNode(mid_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
             circuit.add_2qubit_op(OpNode(control_line, mid_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
 
     def bridge_highway_path(self, circuit, shuttle_idx, source, target):
-        print('bridging between', self.qubit_idx_dict[source], self.qubit_idx_dict[target])
         highway_coupling_graph = get_highway_coupling_graph(self.chiplet_array)
         path = nx.shortest_path(highway_coupling_graph.graph, source, target)
         next_to_source, next_to_target = path[1], path[-2]
@@ -381,7 +377,6 @@ class HighwayManager:
             mid_line_depth = circuit.get_line_depth(mid_line)
             circuit.add_1qubit_op(OpNode(mid_line), depth=mid_line_depth + self.meas_period)
             measured_qubits.add(node2)
-        print('depth={}\n'.format(circuit.depth))
         return measured_qubits
         
     def bridge_throughout_highway(self, circuit, shuttle_idx):
@@ -395,7 +390,7 @@ class HighwayManager:
         occupied_subgraph = nx.subgraph(graph, self.shuttle_stack[shuttle_idx].occupied_highway_qubits)
         multi_degree_nodes_in_orginal_graph = [node for node in occupied_subgraph.nodes if graph.degree(node) >= 3]
         leaf_nodes_in_occupied_subgraph = [node for node in graph if occupied_subgraph.degree(node) == 1]
-        key_nodes = set(multi_degree_nodes_in_orginal_graph + leaf_nodes_in_occupied_subgraph)
+        key_nodes = multi_degree_nodes_in_orginal_graph + leaf_nodes_in_occupied_subgraph
 
         measured_qubits = set()
         for node in key_nodes:
@@ -404,7 +399,7 @@ class HighwayManager:
             for near in nearest_key_nodes:
                 print('      +++++',node, self.qubit_idx_dict[node], near, self.qubit_idx_dict[near])
                 path = nx.shortest_path(occupied_subgraph, node, near)
-                if not set(path[1:-1]).intersection(key_nodes):
+                if not set(path[1:-1]).intersection(set(key_nodes)):
                     pair = tuple(sorted([node, near]))
                     if pair not in visited:
                         measured_on_path = self.bridge_highway_path(circuit, shuttle_idx, node, near)
@@ -432,7 +427,6 @@ class HighwayManager:
             all_nearest_neighbors = [nei for nei in neighbors if abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]) ==  nearest_neighbor_distance]
             best_neighbor = min(all_nearest_neighbors, key=lambda nei: op_num(nei))
             self.bridge(circuit, shuttle_idx, best_neighbor, qubit)
-            print('reentangled {} with {}'.format(self.qubit_idx_dict[qubit], self.qubit_idx_dict[best_neighbor]))
 
     def measure_throughout_highway(self, circuit, shuttle_idx):
         shuttle_end_time = self.get_shuttle_end_time(shuttle_idx)
