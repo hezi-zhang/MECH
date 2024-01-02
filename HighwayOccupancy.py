@@ -11,7 +11,7 @@ class HighwayOccupancy:
         self.highway_qubits = get_highway_qubits(G)
         self.occupied_highway_qubits = set()
         self.occupied_highway_segments = dict() # key = sorted_data_qubits, val = path_on_highway
-        self.source_occupied_highway = defaultdict(set) # key = source_data_qubit, val = set_of_paths
+        self.source_occupied_highway = defaultdict(set) # key = source_data_qubit, val = set_of_path_nodes
         self.source_occupied_entrance = dict() # key = source_data_qubit, val = source_occupied_entrance
         self.source_targets_dict = defaultdict(set) # key = source, val = set_of_targets
         self.source_target_counter = Counter() # key = (source, target)
@@ -65,9 +65,12 @@ class HighwayOccupancy:
         highway_coupling_graph = get_highway_coupling_graph(self.chiplet_array)
         subgraph = nx.subgraph(highway_coupling_graph.graph, subnodes).copy()
         subgraph.add_nodes_from([source, target])
-        for nei in self.chiplet_array.neighbors(source):
-            if nei in self.highway_qubits:
-                subgraph.add_edge(source, nei)
+
+        source_has_occupied_entrance = source in self.source_occupied_entrance.keys()
+        if not source_has_occupied_entrance:
+            for nei in self.chiplet_array.neighbors(source):
+                if nei in self.highway_qubits:
+                    subgraph.add_edge(source, nei)
         for nei in self.chiplet_array.neighbors(target):
             if nei in self.highway_qubits:
                 subgraph.add_edge(target, nei)
@@ -78,15 +81,18 @@ class HighwayOccupancy:
                 subgraph.edges[(n1,n2)]['weight'] = 0
             else:
                 subgraph.edges[(n1,n2)]['weight'] = 1
-        if not nx.has_path(subgraph, source, target):
-            return []
+
+        if source_has_occupied_entrance:
+            src = self.source_occupied_entrance[source]
         else:
-            if source in self.source_occupied_entrance.keys():
-                source_entrance = self.source_occupied_entrance[source]
-                path = [source] + nx.dijkstra_path(subgraph, source_entrance, target)
-            else:
-                path = nx.dijkstra_path(subgraph, source, target)
-            return path
+            src = source
+
+        if not nx.has_path(subgraph, src, target):
+            return [] 
+        path = nx.dijkstra_path(subgraph, src, target)
+        if source_has_occupied_entrance:
+            path = [source] + path  
+        return path
         
     
     def draw(self, size=8, with_labels=True, border=True, data_color='#99CCFF', highway_color='#004C99'):
@@ -101,7 +107,7 @@ class HighwayOccupancy:
         for node in graph.nodes:
             if node in self.occupied_highway_qubits:
                 node_colors.append('orange')
-            elif node in self.source_occupied_highway.keys():
+            elif node in self.source_targets_dict.keys():
                 node_colors.append('green')
             elif node in end_nodes:
                 node_colors.append('yellow')
@@ -386,28 +392,30 @@ class HighwayManager:
             nearest_num = 3
 
         visited = set()
+        source_measured_qubits_dict = defaultdict(set)
         graph = get_highway_coupling_graph(self.chiplet_array).graph
-        occupied_subgraph = nx.subgraph(graph, self.shuttle_stack[shuttle_idx].occupied_highway_qubits)
-        multi_degree_nodes_in_orginal_graph = [node for node in occupied_subgraph.nodes if graph.degree(node) >= 3]
-        leaf_nodes_in_occupied_subgraph = [node for node in graph if occupied_subgraph.degree(node) == 1]
-        key_nodes = multi_degree_nodes_in_orginal_graph + leaf_nodes_in_occupied_subgraph
 
-        measured_qubits = set()
-        for node in key_nodes:
-            nearest_key_nodes = sorted(key_nodes, key=lambda n: abs(n[0] - node[0]) + abs(n[1] - node[1]))[1 : 1 + nearest_num]
-            print('      +++++', self.qubit_idx_dict[node], [self.qubit_idx_dict[near] for near in nearest_key_nodes])
-            for near in nearest_key_nodes:
-                print('      +++++',node, self.qubit_idx_dict[node], near, self.qubit_idx_dict[near])
-                path = nx.shortest_path(occupied_subgraph, node, near)
-                if not set(path[1:-1]).intersection(set(key_nodes)):
-                    pair = tuple(sorted([node, near]))
-                    if pair not in visited:
-                        measured_on_path = self.bridge_highway_path(circuit, shuttle_idx, node, near)
-                        measured_qubits |= measured_on_path
-                        visited.add(pair)
-        return measured_qubits
+        for src, path_nodes in self.shuttle_stack[shuttle_idx].source_occupied_highway.items():
+            occupied_subgraph = nx.subgraph(graph, path_nodes)
+            multi_degree_nodes_in_orginal_graph = [node for node in occupied_subgraph.nodes if graph.degree(node) >= 3]
+            leaf_nodes_in_occupied_subgraph = [node for node in graph if occupied_subgraph.degree(node) == 1 and node not in multi_degree_nodes_in_orginal_graph]
+            key_nodes = multi_degree_nodes_in_orginal_graph + leaf_nodes_in_occupied_subgraph
+            
+            measured_qubits = set()
+            for node in key_nodes:
+                nearest_key_nodes = sorted(key_nodes, key=lambda n: abs(n[0] - node[0]) + abs(n[1] - node[1]))[1 : 1 + nearest_num]
+                for near in nearest_key_nodes:
+                    path = nx.shortest_path(occupied_subgraph, node, near)
+                    if not set(path[1:-1]).intersection(set(key_nodes)):
+                        pair = tuple(sorted([node, near]))
+                        if pair not in visited:
+                            measured_on_path = self.bridge_highway_path(circuit, shuttle_idx, node, near)
+                            measured_qubits |= measured_on_path
+                            visited.add(pair)
+            source_measured_qubits_dict[src] = measured_qubits
+        return source_measured_qubits_dict
     
-    def reentangle_throughout_highway(self, circuit, shuttle_idx, measured_qubits):
+    def reentangle_throughout_highway(self, circuit, shuttle_idx, source_measured_qubits_dict):
         graph = get_highway_coupling_graph(self.chiplet_array).graph
         shuttle_prep_start_time = self.get_shuttle_prep_start_time(shuttle_idx)
         shuttle_exec_start_time = self.get_shuttle_exec_start_time(shuttle_idx)
@@ -417,16 +425,19 @@ class HighwayManager:
             circuit_line = circuit.circuit_lines[line][shuttle_prep_start_time : shuttle_exec_start_time]
             op_list = [op for op in circuit_line if op is not None]
             return len(op_list)
-
-        for qubit in measured_qubits:
-            if qubit not in self.shuttle_stack[shuttle_idx].entrance_data_dict.keys():
-                continue
-            neighbors = list(graph.neighbors(qubit))
-            nearest_neighbor = min(neighbors, key=lambda nei: abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]))
-            nearest_neighbor_distance = abs(nearest_neighbor[0] - qubit[0]) + abs(nearest_neighbor[1] - qubit[1])
-            all_nearest_neighbors = [nei for nei in neighbors if abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]) ==  nearest_neighbor_distance]
-            best_neighbor = min(all_nearest_neighbors, key=lambda nei: op_num(nei))
-            self.bridge(circuit, shuttle_idx, best_neighbor, qubit)
+        
+        for src, measured_qubits in source_measured_qubits_dict.items():
+            path_nodes = self.shuttle_stack[shuttle_idx].source_occupied_highway[src]
+            occupied_subgraph = nx.subgraph(graph, path_nodes)
+            for qubit in measured_qubits:
+                if qubit not in self.shuttle_stack[shuttle_idx].entrance_data_dict.keys():
+                    continue
+                neighbors = list(occupied_subgraph.neighbors(qubit))
+                nearest_neighbor = min(neighbors, key=lambda nei: abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]))
+                nearest_neighbor_distance = abs(nearest_neighbor[0] - qubit[0]) + abs(nearest_neighbor[1] - qubit[1])
+                all_nearest_neighbors = [nei for nei in neighbors if abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]) ==  nearest_neighbor_distance]
+                best_neighbor = min(all_nearest_neighbors, key=lambda nei: op_num(nei))
+                self.bridge(circuit, shuttle_idx, best_neighbor, qubit)
 
     def measure_throughout_highway(self, circuit, shuttle_idx):
         shuttle_end_time = self.get_shuttle_end_time(shuttle_idx)
