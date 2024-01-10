@@ -1,6 +1,12 @@
+from collections import Counter
 from Chiplet import *
 from Circuit import *
 from HighwayOccupancy import *
+
+class ControlBlock:
+    def __init__(self, control, target_counter=Counter()):
+        self.control = control
+        self.target_counter = target_counter
 
 class Router:
     def __init__(self, chip, initial_v2p=None, circuit=None, highway_manager=None, prep_period=2, meas_period=2):
@@ -39,8 +45,9 @@ class Router:
             arrival_depth = max(arrival_depth + 3, cur_depth + 3)
         return arrival_depth
 
-    def execute_control_multi_target_gate(self, v_control, v_targets):
-        remaining_v_targets = set(v_targets)
+    def execute_control_multi_target_block(self, control_block):
+        v_control, v_targets_dict = control_block.control, control_block.target_counter
+        remaining_v_targets = set(v_targets_dict.keys())
 
         # move control qubit to highway
         p_control = self._v2p[v_control]
@@ -67,8 +74,10 @@ class Router:
             line1, line2 = self.highway_manager.qubit_idx_dict[p_control], self.highway_manager.qubit_idx_dict[p_nearest_target]
             
             if blocked_by_p_control:
-                self.highway_manager.execute_on_local(self.circuit, OpNode(line1, line2))
+                for i in range(v_targets_dict[nearest_target]):
+                    self.highway_manager.execute_on_local(self.circuit, OpNode(line1, line2))
             else:
-                self.highway_manager.execute_on_highway(self.circuit, OpNode(line1, line2))
+                for i in range(v_targets_dict[nearest_target]):
+                    self.highway_manager.execute_on_highway(self.circuit, OpNode(line1, line2))
             remaining_v_targets.remove(nearest_target)
 
