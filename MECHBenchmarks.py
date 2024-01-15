@@ -109,6 +109,6 @@ def MECH_experiments(structure, chiplet_array_dim, chiplet_size, custom_highway_
 
         eff_gate_num = on_chip_gate_num + cross_chip_gate_num * cross_chip_gate_weight + meas_num * meas_weight
         result[b] = {'depth': router.circuit.depth, 'eff_gate_num': eff_gate_num, 'on-chip': on_chip_gate_num, 'cross-chip': cross_chip_gate_num, 'meas_num': meas_num, 'weight':(cross_chip_gate_weight, meas_weight), 
-                     'periods':(prep_period, meas_num), 'shuttle_num': len(router.highway_manager.shuttle_stack), 'sparisity':cross_link_sparsity}
+                     'periods':(prep_period, meas_period), 'shuttle_num': len(router.highway_manager.shuttle_stack), 'sparisity':cross_link_sparsity}
 
     return result
