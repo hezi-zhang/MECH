@@ -73,7 +73,7 @@ def MECH_experiments(structure, chiplet_array_dim, chiplet_size, custom_highway_
         for i, control_block in enumerate(program):
             if i%10 == 0:
                 print('{}/{}'.format(i, len(program)))
-            router.execute_control_multi_target_block(control_block)
+            router.execute_control_multi_target_block(control_block, cross_chip_gate_weight, cross_chip_overhead = 3)
 
         for shuttle_idx in range(len(router.highway_manager.shuttle_stack)):
             for idx in range(router.highway_manager.get_shuttle_prep_start_time(shuttle_idx), router.highway_manager.get_shuttle_exec_start_time(shuttle_idx)):
