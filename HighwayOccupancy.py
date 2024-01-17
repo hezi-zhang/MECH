@@ -5,6 +5,8 @@ import networkx as nx
 from Chiplet import *
 from Circuit import *
 
+VERBOSE = False
+
 class HighwayOccupancy:
     def __init__(self, G):
         self.chiplet_array = G
@@ -265,6 +267,8 @@ class HighwayManager:
         for idx in range(latest_idx, exec_start_time, -1):
             prior_role = circuit.take_role(op.control, idx - 1)
             if prior_role not in {None, 'c', 'mc'}: # control data has been changed
+                if VERBOSE:
+                    print(op, 'impossible on shuttle ', shuttle_idx)
                 return -1
         
         # check entrance availability
@@ -344,6 +348,8 @@ class HighwayManager:
             circuit.add_2qubit_op(op, depth=earliest_idx + 1)
         
     def bridge(self, circuit, shuttle_idx, control_qubit, target_qubit, mid=None, auto_commuting=True):
+        if VERBOSE:
+            print('bridging ', self.qubit_idx_dict[control_qubit], self.qubit_idx_dict[target_qubit])
         distance = abs(control_qubit[0] - target_qubit[0]) + abs(control_qubit[1] - target_qubit[1])
         assert distance <= 2
 
@@ -351,18 +357,24 @@ class HighwayManager:
         latest_idx = self.get_shuttle_exec_start_time(shuttle_idx) - 1
         control_line, target_line = self.qubit_idx_dict[control_qubit], self.qubit_idx_dict[target_qubit]
         if distance == 1:
+            if VERBOSE:
+                print('distance == 1: control_line = {}, target_line = {}, earliest_idx = {}, latest_idx = {}'.format(control_line, target_line, earliest_idx, latest_idx))
             circuit.add_2qubit_op(OpNode(control_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
         else:
             if mid is None:
                 mid = nx.shortest_path(self.chiplet_array, control_qubit, target_qubit)[1]
             
             mid_line = self.qubit_idx_dict[mid]
+            if VERBOSE:
+                print('mid = {}, mid_line = {}, control_line = {}, target_line = {}, earliest_idx = {}, latest_idx = {}'.format(self.qubit_idx_dict[mid], mid_line, control_line, target_line, earliest_idx, latest_idx))
             circuit.add_2qubit_op(OpNode(mid_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
             circuit.add_2qubit_op(OpNode(control_line, mid_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
             circuit.add_2qubit_op(OpNode(mid_line, target_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
             circuit.add_2qubit_op(OpNode(control_line, mid_line), auto_commuting=auto_commuting, min_idx=earliest_idx, max_idx=latest_idx)
 
     def bridge_highway_path(self, circuit, shuttle_idx, source, target):
+        if VERBOSE:
+            print('bridging between', self.qubit_idx_dict[source], self.qubit_idx_dict[target])
         highway_coupling_graph = get_highway_coupling_graph(self.chiplet_array)
         path = nx.shortest_path(highway_coupling_graph.graph, source, target)
         next_to_source, next_to_target = path[1], path[-2]
@@ -391,6 +403,15 @@ class HighwayManager:
         if self.chiplet_array.structure in ['hexagon', 'heavy_hexagon']:
             nearest_num = 3
 
+        def nearest_neighboring_key_nodes(n1, key_nodes, nearest_num):
+            neighbor_distance_dict = dict()
+            for n2 in key_nodes:
+                shortest_paths = nx.all_shortest_paths(get_highway_coupling_graph(self.chiplet_array).graph, n1, n2)
+                non_overlapping_paths = [path for path in shortest_paths if not set(path[1:-1]).intersection(set(key_nodes))]
+                if non_overlapping_paths:
+                    neighbor_distance_dict[n2] = len(non_overlapping_paths[0]) + 1
+            return sorted(list(neighbor_distance_dict.keys()), key=lambda k: neighbor_distance_dict[k])[1: 1 + nearest_num]
+
         visited = set()
         source_measured_qubits_dict = defaultdict(set)
         graph = get_highway_coupling_graph(self.chiplet_array).graph
@@ -402,16 +423,27 @@ class HighwayManager:
             key_nodes = multi_degree_nodes_in_orginal_graph + leaf_nodes_in_occupied_subgraph
             
             measured_qubits = set()
+            to_bridge = dict()
+            if VERBOSE:
+                print('key_nodes = ', [self.qubit_idx_dict[node] for node in key_nodes])
             for node in key_nodes:
-                nearest_key_nodes = sorted(key_nodes, key=lambda n: abs(n[0] - node[0]) + abs(n[1] - node[1]))[1 : 1 + nearest_num]
+                nearest_key_nodes = nearest_neighboring_key_nodes(node, key_nodes, leaf_nodes_in_occupied_subgraph, nearest_num)
+                if VERBOSE:
+                    print('+'*16, self.qubit_idx_dict[node], [self.qubit_idx_dict[near] for near in nearest_key_nodes])
                 for near in nearest_key_nodes:
+                    if VERBOSE:
+                        print('    ++++',node, self.qubit_idx_dict[node], near, self.qubit_idx_dict[near])
                     path = nx.shortest_path(occupied_subgraph, node, near)
                     if not set(path[1:-1]).intersection(set(key_nodes)):
                         pair = tuple(sorted([node, near]))
                         if pair not in visited:
-                            measured_on_path = self.bridge_highway_path(circuit, shuttle_idx, node, near)
-                            measured_qubits |= measured_on_path
+                            to_bridge[(node, near)] = len(path) - 1
                             visited.add(pair)
+            if VERBOSE:
+                print('start to bridge: ', sorted(to_bridge.keys(), key=lambda k: to_bridge[k]))
+            for node, near in sorted(to_bridge.keys(), key=lambda k: to_bridge[k]):
+                measured_on_path = self.bridge_highway_path(circuit, shuttle_idx, node, near)
+                measured_qubits |= measured_on_path
             source_measured_qubits_dict[src] = measured_qubits
         return source_measured_qubits_dict
     
@@ -438,6 +470,8 @@ class HighwayManager:
                 all_nearest_neighbors = [nei for nei in neighbors if abs(nei[0] - qubit[0]) + abs(nei[1] - qubit[1]) ==  nearest_neighbor_distance]
                 best_neighbor = min(all_nearest_neighbors, key=lambda nei: op_num(nei))
                 self.bridge(circuit, shuttle_idx, best_neighbor, qubit)
+                if VERBOSE:
+                    print('reentangled {} with {}'.format(self.qubit_idx_dict[qubit], self.qubit_idx_dict[best_neighbor]))
 
     def measure_throughout_highway(self, circuit, shuttle_idx):
         shuttle_end_time = self.get_shuttle_end_time(shuttle_idx)
