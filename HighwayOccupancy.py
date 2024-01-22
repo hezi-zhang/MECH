@@ -427,7 +427,7 @@ class HighwayManager:
             if VERBOSE:
                 print('key_nodes = ', [self.qubit_idx_dict[node] for node in key_nodes])
             for node in key_nodes:
-                nearest_key_nodes = nearest_neighboring_key_nodes(node, key_nodes, leaf_nodes_in_occupied_subgraph, nearest_num)
+                nearest_key_nodes = nearest_neighboring_key_nodes(node, key_nodes, nearest_num)
                 if VERBOSE:
                     print('+'*16, self.qubit_idx_dict[node], [self.qubit_idx_dict[near] for near in nearest_key_nodes])
                 for near in nearest_key_nodes:
